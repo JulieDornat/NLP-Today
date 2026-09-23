@@ -26,6 +26,11 @@ Install the required language models:
 python -m spacy download en_core_web_sm
 pip install --upgrade https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_core_sci_sm-0.5.4.tar.gz
 ```
+or 
+
+```bash
+pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0.tar.gz
+```
 
 ### Notes
 
