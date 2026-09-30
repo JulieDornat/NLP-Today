@@ -10,12 +10,18 @@ from torch.utils.data  import TensorDataset, DataLoader
 from sklearn.metrics import classification_report
 import torch.nn.functional as F
 import argparse
+from gensim.models import Word2Vec, FastText, KeyedVectors
+
+from torch.autograd import Variable
 
 sequence_length = 128
 max_vocab = 32000
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model",default='cnn',type=str,help="The kind of model (lstm or cnn -- default: lstm).",)
+#emb_model: EmbModel = EmbModel.FastText, emb_model_path = "output/fattest_embeddings.bin"
+parser.add_argument("--emb-model",default='0',type=int,help="0:FastText, 1: Word2Vec CBow, 2: Word2Vec Skipgram -- default: 0",)
+parser.add_argument("--emb-model-path",default='output/fattest_embeddings.bin',type=str,help="Path of the embedder -- default: output/fattest_embeddings.bin",)
 parser.add_argument("--train",default='',type=str,help="Training data in csv format",required=True)
 parser.add_argument("--valid",default='',type=str,help="Validation (valid or dev) data in csv format",required=True)
 parser.add_argument("--test",default='',type=str,help="Evaluation data in csv format",required=True)
@@ -27,6 +33,8 @@ valid_file = args.test # dev/valid file in csv format
 test_file = args.valid # test file in csv format
 #mymodel = "lstm" # cnn
 mymodel = args.model # cnn or lstm
+emb_model = args.emb_model
+emb_model_path = args.emb_model_path
 
 epochs = args.epochs
 
@@ -74,12 +82,103 @@ class SentimentModelLSTM(nn.Module):
 
         return o
 
+from enum import Enum
+class EmbModel(Enum):
+    FastText = 0
+    W2V_CBow = 1
+    W2V_Skipgram = 2
 
+class SentimentModelLSTM_Emb(nn.Module):
+    def __init__(self, vocab_size, output_size, hidden_size=128, embedding_size=100, n_layers=2, dropout=0.2, emb_model: EmbModel = EmbModel.FastText, emb_model_path = "output/fattest_embeddings.bin" ):
+        super(SentimentModelLSTM, self).__init__()
+        self.name = "lstm"
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.autograd import Variable
+        # embedding layer is useful to map input into vector representation
+        if emb_model == EmbModel.FastText:
+            loaded_emb_model = FastText.load_fasttext_format(emb_model_path)
+        elif emb_model == EmbModel.W2V_CBow or emb_model == EmbModel.W2V_Skipgram:
+            # emb_model_path = extracted_data/word2vec_output/embeddings/w2v_cbow_med.vec
+            loaded_emb_model = KeyedVectors.load_word2vec_format(emb_model_path, binary=False)
+        else:
+            raise Exception("Unknown embedder.")
+        weights = torch.FloatTensor(loaded_emb_model.wv.vectors)
+        self.embedding = nn.Embedding(vocab_size, embedding_size).from_pretrained(weights)
+
+        # LSTM layer preserved by PyTorch library
+        self.lstm = nn.LSTM(embedding_size, hidden_size, n_layers, dropout=dropout, batch_first=True)
+
+        # dropout layer
+        self.dropout = nn.Dropout(0.3)
+
+        # Linear layer for output
+        self.fc = nn.Linear(hidden_size, output_size)
+
+        # Sigmoid layer cz we will have binary classification
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+
+        # convert feature to long
+        x = x.long()
+
+        # map input to vector
+        x = self.embedding(x)
+
+        # pass forward to lstm
+        o, _ =  self.lstm(x)
+
+        # get last sequence output
+        o = o[:, -1, :]
+
+        # apply dropout and fully connected layer
+        o = self.dropout(o)
+        o = self.fc(o)
+
+        # sigmoid
+        o = self.sigmoid(o)
+
+        return o
+
+class SentimentModelCNN_Emb(nn.Module):
+
+    def __init__(self, vocab_size,embedding_size,class_size, dropout=0.2, emb_model: EmbModel = EmbModel.FastText, emb_model_path = "output/fattest_embeddings.bin"):
+        super(SentimentModelCNN_Emb, self).__init__()
+        self.name = "cnn"
+
+        V = vocab_size
+        D = embedding_size
+        C = class_size
+        Ci = 1
+        Co = 100
+        Ks = [3,4,5]
+
+         # embedding layer is useful to map input into vector representation
+        if emb_model == EmbModel.FastText:
+            loaded_emb_model = FastText.load_fasttext_format(emb_model_path)
+        elif emb_model == EmbModel.W2V_CBow or emb_model == EmbModel.W2V_Skipgram:
+            # emb_model_path = extracted_data/word2vec_output/embeddings/w2v_cbow_med.vec
+            loaded_emb_model = KeyedVectors.load_word2vec_format(emb_model_path, binary=False)
+        else:
+            raise Exception("Unknown embedder.")
+        weights = torch.FloatTensor(loaded_emb_model.wv.vectors)
+        self.embed = nn.Embedding(vocab_size, embedding_size).from_pretrained(weights)
+        
+        self.convs = nn.ModuleList([nn.Conv2d(Ci, Co, (K, D)) for K in Ks])
+        self.dropout = nn.Dropout(dropout)
+        self.fc1 = nn.Linear(len(Ks) * Co, C)
+
+        #if self.args.static:
+            #self.embed.weight.requires_grad = False
+
+    def forward(self, x):
+        x = self.embed(x)  # (N, W, D)
+        x = x.unsqueeze(1)  # (N, Ci, W, D)
+        x = [F.relu(conv(x)).squeeze(3) for conv in self.convs]  # [(N, Co, W), ...]*len(Ks)
+        x = [F.max_pool1d(i, i.size(2)).squeeze(2) for i in x]  # [(N, Co), ...]*len(Ks)
+        x = torch.cat(x, 1)
+        x = self.dropout(x)  # (N, len(Ks)*Co)
+        logit = self.fc1(x)  # (N, C)
+        return logit
 
 
 class SentimentModelCNN(nn.Module):
@@ -95,7 +194,7 @@ class SentimentModelCNN(nn.Module):
         Co = 100
         Ks = [3,4,5]
 
-        self.embed = nn.Embedding(V, D)
+        self.embed = nn.Embedding(V, D).from_pretrained()
         self.convs = nn.ModuleList([nn.Conv2d(Ci, Co, (K, D)) for K in Ks])
         self.dropout = nn.Dropout(dropout)
         self.fc1 = nn.Linear(len(Ks) * Co, C)
@@ -191,6 +290,8 @@ def load_and_preprocess_data(filename_train,filename_valid,filename_test, seq_le
     l_test_y = l_data_test.label.to_numpy()
     return l_train_x,l_train_y,l_valid_x,l_valid_y,l_test_x,l_test_y,word2int
 
+
+
 train_x,train_y,valid_x,valid_y,test_x,test_y,vocab_index = load_and_preprocess_data(train_file,valid_file,test_file,sequence_length,max_vocab)
 
 # print out the shape
@@ -214,8 +315,6 @@ testset = TensorDataset(torch.from_numpy(test_x), torch.from_numpy(test_y))
 trainloader = DataLoader(trainset, shuffle=True, batch_size=batch_size)
 valloader = DataLoader(validset, shuffle=True, batch_size=batch_size)
 testloader = DataLoader(testset, shuffle=True, batch_size=batch_size)
-
-
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -242,11 +341,12 @@ num_classes = 2
 # model initialization
 model = None
 if mymodel == 'lstm':
-    model = SentimentModelLSTM(vocab_size, output_size, hidden_size, embedding_size, n_layers, dropout)
+    model = SentimentModelLSTM_Emb(vocab_size, output_size, hidden_size, embedding_size, n_layers, dropout, emb_model_path=emb_model_path, emb_model=emb_model)
 if mymodel == 'cnn':
-    model = SentimentModelCNN(vocab_size,embedding_size,num_classes)
+    model = SentimentModelCNN_Emb(vocab_size,embedding_size,num_classes, emb_model_path=emb_model_path, emb_model=emb_model)
 #model = SentimentModelCNN(vocab_size, embedding_size, n_filters, filter_sizes, pool_size, hidden_size, num_classes, sequence_length, dropout_keep_prob)
 print(model)
+
 
 # training config
 #lr = 0.001
