@@ -14,6 +14,8 @@ from gensim.models import Word2Vec, FastText, KeyedVectors
 
 from torch.autograd import Variable
 
+from scripts.transformers_classification import read_conll
+
 sequence_length = 128
 max_vocab = 32000
 
@@ -22,9 +24,9 @@ parser.add_argument("--model",default='cnn',type=str,help="The kind of model (ls
 #emb_model: EmbModel = EmbModel.FastText, emb_model_path = "output/fattest_embeddings.bin"
 parser.add_argument("--emb-model",default='0',type=int,help="0:FastText, 1: Word2Vec CBow, 2: Word2Vec Skipgram -- default: 0",)
 parser.add_argument("--emb-model-path",default='output/fattest_embeddings.bin',type=str,help="Path of the embedder -- default: output/fattest_embeddings.bin",)
-parser.add_argument("--train",default='',type=str,help="Training data in csv format",required=True)
-parser.add_argument("--valid",default='',type=str,help="Validation (valid or dev) data in csv format",required=True)
-parser.add_argument("--test",default='',type=str,help="Evaluation data in csv format",required=True)
+parser.add_argument("--train",default='',type=str,help="Training data in cnll format",required=True)
+parser.add_argument("--valid",default='',type=str,help="Validation (valid or dev) data in cnll format",required=True)
+parser.add_argument("--test",default='',type=str,help="Evaluation data in cnll format",required=True)
 parser.add_argument("--epochs",default=1,type=int,help="Number of epoch")
 args = parser.parse_args()
 
@@ -89,10 +91,9 @@ class EmbModel(Enum):
     W2V_Skipgram = 2
 
 class SentimentModelLSTM_Emb(nn.Module):
-    def __init__(self, vocab_size, output_size, hidden_size=128, embedding_size=100, n_layers=2, dropout=0.2, emb_model: EmbModel = EmbModel.FastText, emb_model_path = "output/fattest_embeddings.bin" ):
+    def __init__(self, output_size, hidden_size=128, n_layers=2, dropout=0.2, emb_model: EmbModel = EmbModel.FastText, emb_model_path = "output/fattest_embeddings.bin" ):
         super(SentimentModelLSTM, self).__init__()
         self.name = "lstm"
-
         # embedding layer is useful to map input into vector representation
         if emb_model == EmbModel.FastText:
             loaded_emb_model = FastText.load_fasttext_format(emb_model_path)
@@ -101,6 +102,9 @@ class SentimentModelLSTM_Emb(nn.Module):
             loaded_emb_model = KeyedVectors.load_word2vec_format(emb_model_path, binary=False)
         else:
             raise Exception("Unknown embedder.")
+
+        vocab_size = len(loaded_emb_model.key_to_index)
+        embedding_size = loaded_emb_model.vector_size
         weights = torch.FloatTensor(loaded_emb_model.wv.vectors)
         self.embedding = nn.Embedding(vocab_size, embedding_size).from_pretrained(weights)
 
@@ -141,12 +145,10 @@ class SentimentModelLSTM_Emb(nn.Module):
 
 class SentimentModelCNN_Emb(nn.Module):
 
-    def __init__(self, vocab_size,embedding_size,class_size, dropout=0.2, emb_model: EmbModel = EmbModel.FastText, emb_model_path = "output/fattest_embeddings.bin"):
+    def __init__(self,class_size, dropout=0.2, emb_model: EmbModel = EmbModel.FastText, emb_model_path = "output/fattest_embeddings.bin"):
         super(SentimentModelCNN_Emb, self).__init__()
         self.name = "cnn"
 
-        V = vocab_size
-        D = embedding_size
         C = class_size
         Ci = 1
         Co = 100
@@ -160,9 +162,13 @@ class SentimentModelCNN_Emb(nn.Module):
             loaded_emb_model = KeyedVectors.load_word2vec_format(emb_model_path, binary=False)
         else:
             raise Exception("Unknown embedder.")
+        vocab_size = len(loaded_emb_model.key_to_index)
+        embedding_size = loaded_emb_model.vector_size
         weights = torch.FloatTensor(loaded_emb_model.wv.vectors)
         self.embed = nn.Embedding(vocab_size, embedding_size).from_pretrained(weights)
-        
+
+        V = vocab_size
+        D = embedding_size
         self.convs = nn.ModuleList([nn.Conv2d(Ci, Co, (K, D)) for K in Ks])
         self.dropout = nn.Dropout(dropout)
         self.fc1 = nn.Linear(len(Ks) * Co, C)
@@ -213,86 +219,17 @@ class SentimentModelCNN(nn.Module):
         return logit
 
 
-def pad_features(reviews, pad_id, seq_length=128):
-    # features = np.zeros((len(reviews), seq_length), dtype=int)
-    features = np.full((len(reviews), seq_length), pad_id, dtype=int)
+# Our data is a set of tokens grouped by sentences.
+# Each sentence is separated by a new line.
+# The previous code was loading textual data and performing textual classification (one label per sentence).
+# We want to perform a NER task, i.e. token classification.
+# We adapt the data loading and preprocessing to have a set of tokens with their corresponding labels (one label per token).
+# We change the embedding model to use our pretrained embeddings (FastText and Word2Vec).
 
-    for i, row in enumerate(reviews):
-        # if seq_length < len(row) then review will be trimmed
-        features[i, :len(row)] = np.array(row)[:seq_length]
+train_x, train_y = read_conll(train_file)
+valid_x, valid_y = read_conll(valid_file)
+test_x, test_y = read_conll(test_file)
 
-    return features
-
-def encode_review(reviews, index, seq_length=128):
-
-    # encode words
-    reviews_enc = []
-    for review in tqdm(reviews):
-        l_reviews_enc = []
-        for word in review.split():
-            if word in index:
-                l_reviews_enc.append(index[word])
-            else:
-                l_reviews_enc.append(1)
-        reviews_enc.append(l_reviews_enc)
-    #reviews_enc = [[index[word] for word in review.split()] for review in tqdm(reviews)]
-
-    x = pad_features(reviews_enc, pad_id=index['<PAD>'], seq_length=seq_length)
-    assert len(x) == len(reviews_enc)
-    assert len(x[0]) == seq_length
-    return x
-
-
-def load_and_preprocess_data(filename_train,filename_valid,filename_test, seq_length=128, max_vocab=-1):
-    print("loading files...")
-    l_data_train = pd.read_csv(filename_train)
-    l_data_valid = pd.read_csv(filename_valid)
-    l_data_test = pd.read_csv(filename_test)
-
-    # get all processed reviews
-    reviews_train = l_data_train.review.values
-    reviews_valid = l_data_valid.review.values
-    reviews_test = l_data_test.review.values
-
-
-    print("Merging files...")
-    # merge into single variable, separated by whitespaces
-    words = ' '.join(reviews_train) + " " + ' '.join(reviews_valid) + " " + ' '.join(reviews_test)
-    # obtain list of words
-    words = words.split()
-
-    # build vocabulary
-    print("Building vocab...")
-    counter = Counter(words)
-    vocab = sorted(counter, key=counter.get, reverse=True)
-    if max_vocab != -1:
-        vocab = vocab[:max_vocab]
-    int2word = dict(enumerate(vocab, 2))
-    int2word[0] = '<PAD>'
-    int2word[1] = '<UNK>'
-    word2int = {word: id for id, word in int2word.items()}
-
-
-    ## encode words
-    #reviews_enc = [[word2int[word] for word in review.split()] for review in tqdm(reviews)]
-
-
-    #seq_length = 256
-    print("Encoding reviews...")
-    #train_x = pad_features(reviews_enc, pad_id=word2int['<PAD>'], seq_length=seq_length)
-    l_train_x = encode_review(reviews_train,word2int,seq_length)
-    l_valid_x = encode_review(reviews_valid,word2int,seq_length)
-    l_test_x = encode_review(reviews_test,word2int,seq_length)
-
-    # get labels as numpy
-    l_train_y = l_data_train.label.to_numpy()
-    l_valid_y = l_data_valid.label.to_numpy()
-    l_test_y = l_data_test.label.to_numpy()
-    return l_train_x,l_train_y,l_valid_x,l_valid_y,l_test_x,l_test_y,word2int
-
-
-
-train_x,train_y,valid_x,valid_y,test_x,test_y,vocab_index = load_and_preprocess_data(train_file,valid_file,test_file,sequence_length,max_vocab)
 
 # print out the shape
 print('Feature Shapes:')
@@ -319,10 +256,7 @@ testloader = DataLoader(testset, shuffle=True, batch_size=batch_size)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-vocab_size = len(vocab_index)
-print("Taille vocabulaire", vocab_size)
 output_size = 1
-embedding_size = 100
 hidden_size = 128
 n_layers = 1
 dropout=0.25
@@ -331,7 +265,6 @@ dropout=0.25
 lr = 1e-4
 #dropout_keep_prob = 0.5
 max_document_length = sequence_length  # each sentence has until 100 words
-max_size = vocab_size # maximum vocabulary size
 #seed = 1
 num_classes = 2
 #pool_size = 2
@@ -341,9 +274,9 @@ num_classes = 2
 # model initialization
 model = None
 if mymodel == 'lstm':
-    model = SentimentModelLSTM_Emb(vocab_size, output_size, hidden_size, embedding_size, n_layers, dropout, emb_model_path=emb_model_path, emb_model=emb_model)
+    model = SentimentModelLSTM_Emb(output_size, hidden_size, n_layers, dropout, emb_model_path=emb_model_path, emb_model=emb_model)
 if mymodel == 'cnn':
-    model = SentimentModelCNN_Emb(vocab_size,embedding_size,num_classes, emb_model_path=emb_model_path, emb_model=emb_model)
+    model = SentimentModelCNN_Emb(num_classes, emb_model_path=emb_model_path, emb_model=emb_model)
 #model = SentimentModelCNN(vocab_size, embedding_size, n_filters, filter_sizes, pool_size, hidden_size, num_classes, sequence_length, dropout_keep_prob)
 print(model)
 
