@@ -34,7 +34,6 @@ parser.add_argument('--lr',  type=float, help='learning rate (default 1e-05)', d
 
 args = parser.parse_args()
 
-print("parsed args")
 
 ## New code
 
@@ -45,19 +44,19 @@ def read_conll(path):
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.rstrip("\n")
-            if line.strip() == "":              # blank line = sentence boundary
+            if line.strip() == "": # blank line = sentence boundary
                 if tokens:
                     sentences.append(tokens)
                     labels.append(tags)
                     tokens, tags = [], []
                 continue
-            parts = line.split()                # whitespace split (works here)
-            if len(parts) < 5:                  # skip malformed/comment lines
+            parts = line.split() # whitespace split 
+            if len(parts) < 5: # skip malformed and blank lines
                 continue
-            tokens.append(parts[1])             # token
-            tags.append(parts[4])               # tag
-        if tokens:                              # flush last sentence if file
-            sentences.append(tokens)            # doesn't end with blank line
+            tokens.append(parts[1]) # token is on 2nd column
+            tags.append(parts[4]) # tag is on 5th
+        if tokens:     
+            sentences.append(tokens) 
             labels.append(tags)
     return sentences, labels
 # "C:/Users/marin/OneDrive - Université Paris-Saclay/P5/NLP Today/NLP-Today/TP3/QUAERO_FrenchMed/MEDLINE/MEDLINEdev_layer1_ID.conll
@@ -212,7 +211,7 @@ print(f"Loaded {bert_model}, num_labels = {len(all_tags)}")
 
 training_args = TrainingArguments(
     output_dir=f"ner_{bert_model.replace('/', '_')}",
-    evaluation_strategy="epoch",     # no choice if transformers >= 4.46
+    evaluation_strategy="epoch",     # if transformers >= 4.46
     save_strategy="epoch",
     learning_rate=LEARNING_RATE,
     per_device_train_batch_size=TRAIN_BATCH_SIZE,
