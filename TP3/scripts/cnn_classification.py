@@ -12,6 +12,8 @@ import torch.nn.functional as F
 import argparse
 from gensim.models import Word2Vec, FastText, KeyedVectors
 from gensim.models.fasttext import load_facebook_vectors
+from seqeval.metrics import classification_report as cls_report, f1_score
+from seqeval.scheme import IOB2
 
 from torch.autograd import Variable
 
@@ -37,8 +39,8 @@ parser.add_argument("--lr",default=0.0001,type=float,help="Learning rate")
 args = parser.parse_args()
 
 train_file = args.train # train file in csv format
-valid_file = args.test # dev/valid file in csv format
-test_file = args.valid # test file in csv format
+valid_file = args.valid # dev/valid file in csv format
+test_file = args.test # test file in csv format
 #mymodel = "lstm" # cnn
 mymodel = args.model # cnn or lstm
 emb_model = EmbModel(args.emb_model)
@@ -73,8 +75,8 @@ def read_conll(path):
             if len(parts) < 5:                  # skip malformed/comment lines
                 continue
             # Remove STOPWORDS
-            if parts[1].lower() in STOPWORDS:
-                continue
+            # if parts[1].lower() in STOPWORDS:
+            #     continue
             tokens.append(parts[1])             # token
             tags.append(parts[4])               # tag
         if tokens:                              # flush last sentence if file
@@ -82,23 +84,43 @@ def read_conll(path):
             labels.append(tags)
     return sentences, labels
 
+# --------------------------------------------------------------------------- #
+# Embeddings
+# --------------------------------------------------------------------------- #
+def load_embeddings(emb_model, path):
+    if emb_model == EmbModel.FastText:
+        return load_facebook_vectors(path)
+    if emb_model in (EmbModel.W2V_CBow, EmbModel.W2V_Skipgram):
+        return KeyedVectors.load_word2vec_format(path, binary=False)
+    raise ValueError("Unknown embedder.")
+
+
+def build_embedding_matrix(kv, word2int):
+    """Matrice d'embeddings alignée sur word2int : la ligne i = vecteur du mot d'indice i."""
+    unk_vec = kv.vectors.mean(axis=0)
+    matrix = np.zeros((len(word2int), kv.vector_size), dtype=np.float32)  # ligne 0 = PAD = zéros
+    n_oov = 0
+    for word, idx in word2int.items():
+        if word == '<PAD>':
+            continue
+        if word == '<UNK>':
+            matrix[idx] = unk_vec
+            continue
+        try:
+            matrix[idx] = kv[word]  # FastText : fonctionne aussi hors vocabulaire (n-grammes)
+        except KeyError:
+            matrix[idx] = unk_vec
+            n_oov += 1
+    print(f"Embedding matrix: {matrix.shape}, mots sans vecteur (-> UNK) : {n_oov}")
+    return torch.from_numpy(matrix)
+
 class NERModelLSTM(nn.Module):
-    def __init__(self, output_size, hidden_size=128, n_layers=2, dropout=0.2, emb_model: EmbModel = EmbModel.FastText, emb_model_path = "output/fattest_embeddings.bin" ):
+    def __init__(self, embedding_weights, output_size, hidden_size=128, n_layers=2, dropout=0.2 ):
         super(NERModelLSTM, self).__init__()
         self.name = "lstm"
         # embedding layer is useful to map input into vector representation
-        if emb_model == EmbModel.FastText:
-            loaded_emb_model = load_facebook_vectors(emb_model_path)
-        elif emb_model == EmbModel.W2V_CBow or emb_model == EmbModel.W2V_Skipgram:
-            # emb_model_path = extracted_data/word2vec_output/embeddings/w2v_cbow_med.vec
-            loaded_emb_model = KeyedVectors.load_word2vec_format(emb_model_path, binary=False)
-        else:
-            raise Exception("Unknown embedder.")
-
-        vocab_size = len(loaded_emb_model.key_to_index)
-        embedding_size = loaded_emb_model.vector_size
-        weights = torch.FloatTensor(loaded_emb_model.vectors)
-        self.embedding = nn.Embedding(vocab_size, embedding_size).from_pretrained(weights)
+        self.embedding = nn.Embedding.from_pretrained(embedding_weights, freeze=True, padding_idx=0)
+        embedding_size = embedding_weights.shape[1]
 
         # LSTM layer preserved by PyTorch library
         # Add bidirectionnal: look at the next word help to classify the token.
@@ -135,7 +157,7 @@ class NERModelLSTM(nn.Module):
 
 class NERModelCNN(nn.Module):
 
-    def __init__(self,class_size, dropout=0.2, emb_model: EmbModel = EmbModel.FastText, emb_model_path = "output/fattest_embeddings.bin"):
+    def __init__(self, embedding_weights, class_size, dropout=0.2):
         super(NERModelCNN, self).__init__()
         self.name = "cnn"
 
@@ -145,21 +167,10 @@ class NERModelCNN(nn.Module):
         Ks = [3,5,7]
 
          # embedding layer is useful to map input into vector representation
-        if emb_model == EmbModel.FastText:
-            loaded_emb_model = load_facebook_vectors(emb_model_path)
-        elif emb_model == EmbModel.W2V_CBow or emb_model == EmbModel.W2V_Skipgram:
-            # emb_model_path = extracted_data/word2vec_output/embeddings/w2v_cbow_med.vec
-            loaded_emb_model = KeyedVectors.load_word2vec_format(emb_model_path, binary=False)
-        else:
-            raise Exception("Unknown embedder.")
-        vocab_size = len(loaded_emb_model.key_to_index)
-        embedding_size = loaded_emb_model.vector_size
-        weights = torch.FloatTensor(loaded_emb_model.vectors)
-        self.embed = nn.Embedding(vocab_size, embedding_size).from_pretrained(weights)
+        self.embed = nn.Embedding.from_pretrained(embedding_weights, freeze=True, padding_idx=0)
+        embedding_size = embedding_weights.shape[1]
         print("Embedding initialized")
 
-        V = vocab_size
-        D = embedding_size
         self.convs = nn.ModuleList([nn.Conv2d(Ci, Co, (K, embedding_size), padding=(K // 2, 0)) for K in Ks])
         
         print("Convs initialized")
@@ -225,15 +236,20 @@ def load_and_preprocess_data(filename_train, filename_valid, filename_test, seq_
     valid_sentences, valid_labels = read_conll(filename_valid)
     test_sentences, test_labels = read_conll(filename_test)
 
-    # Merge B- and I- variants into a single entity tag (for example, B-PROC/I-PROC -> PROC).
-    def normalize_tag(tag):
-        if tag.startswith(('B-', 'I-')):
-            return tag[2:]
-        return tag
+    #Merge B- and I- variants into a single entity tag (for example, B-PROC/I-PROC -> PROC).
+    # def normalize_tag(tag):
+    #     if tag.startswith(('B-', 'I-')):
+    #         return tag[2:]
+    #     return tag
 
-    train_labels = [[normalize_tag(tag) for tag in tags] for tags in train_labels]
-    valid_labels = [[normalize_tag(tag) for tag in tags] for tags in valid_labels]
-    test_labels = [[normalize_tag(tag) for tag in tags] for tags in test_labels]
+    # train_labels = [[normalize_tag(tag) for tag in tags] for tags in train_labels]
+    # valid_labels = [[normalize_tag(tag) for tag in tags] for tags in valid_labels]
+    # test_labels = [[normalize_tag(tag) for tag in tags] for tags in test_labels]
+
+    for name, sents in [('train', train_sentences), ('valid', valid_sentences), ('test', test_sentences)]:
+        n_long = sum(len(s) > seq_length for s in sents)
+        if n_long:
+            print(f"[WARNING] {name}: {n_long}/{len(sents)} phrases > {seq_length} tokens (tronquées)")
 
     print("Building vocabulary and tag dictionaries...")
     
@@ -277,6 +293,7 @@ def load_and_preprocess_data(filename_train, filename_valid, filename_test, seq_
 
 
 train_x,train_y,valid_x,valid_y,test_x,test_y,word2int, tag2int = load_and_preprocess_data(train_file,valid_file,test_file,sequence_length,max_vocab)
+int2tag = {idx: tag for tag, idx in tag2int.items()}
 
 # print out the shape
 print('Feature Shapes:')
@@ -284,7 +301,6 @@ print('===============')
 print('Train set: {}'.format(train_x.shape))
 print('Validation set: {}'.format(valid_x.shape))
 print('Test set: {}'.format(test_x.shape))
-
 
 
 # define batch size
@@ -307,9 +323,6 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 hidden_size = 128
 n_layers = 1
 dropout=0.25
-
-
-#dropout_keep_prob = 0.5
 max_document_length = sequence_length  # each sentence has until 100 words
 #seed = 1
 num_classes = len(tag2int)
@@ -317,13 +330,18 @@ num_classes = len(tag2int)
 #n_filters = 128
 #filter_sizes = [3, 8]
 
+print("Load embeddings")
+kv = load_embeddings(emb_model, emb_model_path)
+embedding_weights = build_embedding_matrix(kv, word2int) 
+del kv
+
 # model initialization
 print("Initialize model")
 model = None
 if mymodel == 'lstm':
-    model = NERModelLSTM(output_size=num_classes, hidden_size=hidden_size, n_layers=n_layers, dropout=dropout, emb_model_path=emb_model_path, emb_model=emb_model)
+    model = NERModelLSTM(embedding_weights, output_size=num_classes, hidden_size=hidden_size, n_layers=n_layers, dropout=dropout)
 if mymodel == 'cnn':
-    model = NERModelCNN(num_classes, emb_model_path=emb_model_path, emb_model=emb_model)
+    model = NERModelCNN(embedding_weights, num_classes)
 #model = SentimentModelCNN(vocab_size, embedding_size, n_filters, filter_sizes, pool_size, hidden_size, num_classes, sequence_length, dropout_keep_prob)
 print(model)
 
@@ -331,18 +349,16 @@ print(model)
 # training config
 #criterion = nn.BCELoss()  # we use BCELoss cz we have binary classification problem
 
-# IMPROVEMENT: Smooth weights to prevent majority class dominance.
-from sklearn.utils.class_weight import compute_class_weight
-y_train_flat = np.concatenate([seq for seq in train_y])
-y_train_flat_no_pad = y_train_flat[y_train_flat != 0] # we remove the padding class
+# --------------------------------------------------------------------------- #
+# Loss with smooth class weights (outside padding)
+# --------------------------------------------------------------------------- #
+counts = np.bincount(train_y[train_y != 0], minlength=num_classes).astype(float)
+present = counts > 0
+w = np.ones(num_classes)
+w[present] = np.sqrt(counts[present].sum() / (present.sum() * counts[present]))  # 'balanced' lissé (sqrt)
+w[present] /= w[present].mean()
+weights_tensor = torch.FloatTensor(w).to(device)
 
-classes_unique = np.unique(y_train_flat)
-raw_weights = compute_class_weight('balanced', classes=classes_unique, y=y_train_flat)
-
-smoothed_weights = np.sqrt(raw_weights) 
-smoothed_weights = smoothed_weights / np.mean(smoothed_weights)
-
-weights_tensor = torch.FloatTensor(smoothed_weights).to(device)
 criterion = nn.CrossEntropyLoss(weight=weights_tensor, ignore_index=0)
 
 optim = Adam(model.parameters(), lr=lr)
@@ -379,6 +395,8 @@ for e in epochloop:
     model.train()
 
     train_loss = 0
+    total_correct = 0
+    total_tokens = 0
     train_acc = 0
 
     for id, (feature, target) in enumerate(trainloader):
@@ -405,6 +423,8 @@ for e in epochloop:
         acc = correct / total if total > 0 else 0.0
         
         train_acc += acc
+        total_correct += correct
+        total_tokens += total
         train_loss += loss.item()
 
         loss.backward()
@@ -419,7 +439,7 @@ for e in epochloop:
         del feature, target, predicted, out
 
     history['train_loss'].append(train_loss / len(trainloader))
-    history['train_acc'].append(train_acc / len(trainloader))
+    history['train_acc'].append(total_correct / total_tokens if total_tokens > 0 else 0.0)
 
     ####################
     # validation model #
@@ -429,6 +449,8 @@ for e in epochloop:
 
     val_loss = 0
     val_acc = 0
+    total_correct = 0
+    total_tokens = 0
 
     with torch.no_grad():
         for id, (feature, target) in enumerate(valloader):
@@ -451,12 +473,14 @@ for e in epochloop:
 
             val_acc += acc
             val_loss += loss.item()
+            total_correct += correct
+            total_tokens += total
 
             # free some memory
             del feature, target, predicted, out
 
         history['val_loss'].append(val_loss / len(valloader))
-        history['val_acc'].append(val_acc / len(valloader))
+        history['val_acc'].append(total_correct / total_tokens if total_tokens > 0 else 0.0)
 
     # reset model mode
     model.train()
@@ -485,12 +509,55 @@ for e in epochloop:
         history['epochs'] = e+1
         break
 
+# --------------------------------------------------------------------------- #
+# Evaluation utility functions (seqeval)
+# --------------------------------------------------------------------------- #
+def predict(out):
+    """argmax by excluding the <PAD> class (index 0)."""
+    out = out.detach().clone()
+    out[..., 0] = float('-inf')
+    return out.argmax(dim=-1)
+
+
+def decode(predicted, target):
+    """Tensors (N, L) -> two lists of lists of tags (one list per sentence), without padding."""
+    y_true, y_pred = [], []
+    for p_row, t_row in zip(predicted.cpu().numpy(), target.cpu().numpy()):
+        keep = t_row != 0
+        y_true.append([int2tag[i] for i in t_row[keep]])
+        y_pred.append([int2tag[i] for i in p_row[keep]])
+    return y_true, y_pred
+
+
+def evaluate(model, loader):
+    model.eval()
+    total_loss, correct, total = 0.0, 0, 0
+    y_true, y_pred = [], []
+    with torch.no_grad():
+        for feature, target in loader:
+            feature, target = feature.to(device), target.to(device)
+            out = model(feature)
+            total_loss += criterion(out.reshape(-1, num_classes), target.reshape(-1)).item()
+
+            predicted = predict(out)
+            mask = target != 0
+            correct += ((predicted == target) & mask).sum().item()
+            total += mask.sum().item()
+
+            t, p = decode(predicted, target)
+            y_true += t
+            y_pred += p
+    return total_loss / len(loader), correct / max(total, 1), y_true, y_pred
+
+
 # test loop
 model.eval()
 
 # metrics
 test_loss = 0
 test_acc = 0
+correct = 0
+total = 0
 
 all_target = []
 all_predicted = []
@@ -504,25 +571,42 @@ with torch.no_grad():
         loss = criterion(out.view(-1, num_classes), target.view(-1))
         test_loss += loss.item()
 
-        predicted = torch.argmax(out, dim=-1)
+        predicted = predict(out)
 
         mask = target != 0
-        correct = ((predicted == target) & mask).sum().item()
+        correct += ((predicted == target) & mask).sum().item()
         total = mask.sum().item()
-        acc = correct / total if total > 0 else 0.0
-        test_acc += acc
+        # acc = correct / total if total > 0 else 0.0
+        # test_acc += acc
 
-        valid_indices = mask.view(-1)
-        flat_target = target.view(-1)
-        flat_predicted = predicted.view(-1)
+        t, p = decode(predicted, target)
+        all_target.extend(t)
+        all_predicted.extend(p)
 
-        all_target.extend(flat_target[valid_indices].cpu().numpy())
-        all_predicted.extend(flat_predicted[valid_indices].cpu().numpy())
+        # valid_indices = mask.view(-1)
+        # flat_target = target.view(-1)
+        # flat_predicted = predicted.view(-1)
 
-    print(f'Accuracy: {test_acc/len(testloader):.4f}, Loss: {test_loss/len(testloader):.4f}')
+        # all_target.extend(flat_target[valid_indices].cpu().numpy())
+        # all_predicted.extend(flat_predicted[valid_indices].cpu().numpy())
 
-print()
-print(classification_report(all_target, all_predicted))
+    print(f'Accuracy: {correct/total if total > 0 else 0.0:.4f}, Loss: {test_loss/len(testloader):.4f}')
+
+# --------------------------------------------------------------------------- #
+# Evaluation
+# --------------------------------------------------------------------------- #
+
+# Exclude the padding label (0) and report all actual NER classes.
+print("=== Sklearn evaluation ===")
+flat_target = [tag for sentence in all_target for tag in sentence]
+flat_predicted = [tag for sentence in all_predicted for tag in sentence]
+labels_to_eval = [tag for tag in int2tag.values() if tag != '<PAD>']
+
+print(classification_report(flat_target, flat_predicted, labels=labels_to_eval, zero_division=0))
+
+print("=== Seqeval evaluation ===")
+print(cls_report(all_target, all_predicted, scheme=IOB2, mode='strict'))
+print(f"Micro-F1 (strict): {f1_score(all_target, all_predicted, scheme=IOB2, mode='strict'):.4f}")
 
 # --- Display learning curve ---
 import matplotlib.pyplot as plt

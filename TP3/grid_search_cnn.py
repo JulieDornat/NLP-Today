@@ -18,27 +18,25 @@ emb_model_path = [f"./output/fasttext_med.bin",
 
 
 models = ['cnn', 'lstm']
-learning_rates = [1e-5, 5e-5, 1e-4]
+learning_rates = [1e-5, 5e-5, 1e-4, 1e-3]
 index = [0, 1, 2]
 results = []
 
 def extract_f1(output):
     """Extract the last explicitly reported F1 score from script output."""
-    matches = re.findall(
-        r"\bf1(?:[-_\s]?score)?\s*[:=]\s*(\d+(?:\.\d+)?)%?",
-        output,
-        flags=re.IGNORECASE,
-    )
-    if matches:
-        return float(matches[-1])
+    match = re.search(r"Micro-F1\s*\(strict\)\s*:\s*(\d+(?:\.\d+)?)",
+                      output, re.IGNORECASE)
+    if match:
+        return float(match.group(1))
 
-    # Support the weighted-average row of a sklearn classification report.
-    rows = re.findall(
-        r"(?im)^\s*weighted\s+avg\s+\d+(?:\.\d+)?\s+"
-        r"\d+(?:\.\d+)?\s+(\d+(?:\.\d+)?)",
-        output,
-    )
-    return float(rows[-1]) if rows else None
+    # Support the weighted-average row of a seqeval classification report.
+    seqeval_section = output.split("=== Seqeval evaluation ===")
+    if len(seqeval_section) > 1:
+        micro_match = re.search(r"micro avg\s+\d+\.\d+\s+\d+\.\d+\s+(\d+\.\d+)", seqeval_section[1])
+        if micro_match:
+            return float(micro_match.group(1))
+            
+    return None
 
 
 # Pair each embedding path with its corresponding embedding index.
@@ -75,14 +73,29 @@ for model, lr, (emb_path, idx) in grid:
     except subprocess.CalledProcessError as e:
         print(f"Erreur lors de l'exécution : {e.stderr}")
 
-print("\nBest configuration for each embedding:")
+print("\n========================================")
+print("Best configuration for each embedding (based on Seqeval Micro-F1):")
+print("========================================")
 for emb_path, _ in embeddings:
     embedding_results = [r for r in results if r["embedding"] == emb_path]
     if embedding_results:
-        best = max(embedding_results, key=lambda r: r["f1"])
+        best = max(embedding_results, key=lambda r: r["seqeval_f1"])
         print(
-            f"{emb_path}: model={best['model']}, learning rate={best['lr']}, "
-            f"F1={best['f1']}"
+            f"Embedding: {emb_path}\n"
+            f"  -> Model: {best['model']}\n"
+            f"  -> Learning Rate: {best['lr']}\n"
+            f"  -> Seqeval Micro-F1: {best['seqeval_f1']:.4f}\n"
         )
     else:
-        print(f"{emb_path}: no F1 results available")
+        print(f"{emb_path}: no results available\n")
+
+# Optionnel : Afficher la toute meilleure configuration globale toutes catégories confondues
+if results:
+    absolute_best = max(results, key=lambda r: r["seqeval_f1"])
+    print("========================================")
+    print(f"🏆 ABSOLUTE BEST CONFIGURATION (Seqeval):")
+    print(f"   Model: {absolute_best['model']}")
+    print(f"   Embedding: {absolute_best['embedding']}")
+    print(f"   Learning Rate: {absolute_best['lr']}")
+    print(f"   Seqeval Micro-F1: {absolute_best['seqeval_f1']:.4f}")
+    print("========================================")
