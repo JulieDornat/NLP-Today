@@ -48,6 +48,14 @@ lr = args.lr
 epochs = args.epochs
 
 print(emb_model)
+
+import nltk
+from nltk.corpus import stopwords
+
+# Run this once if you haven't downloaded them yet
+nltk.download('stopwords')
+STOPWORDS = set(stopwords.words('french'))
+
 def read_conll(path):
     print("enterred read")
     sentences, labels = [], []
@@ -63,6 +71,9 @@ def read_conll(path):
                 continue
             parts = line.split()                # whitespace split (works here)
             if len(parts) < 5:                  # skip malformed/comment lines
+                continue
+            # Remove STOPWORDS
+            if parts[1].lower() in STOPWORDS:
                 continue
             tokens.append(parts[1])             # token
             tags.append(parts[4])               # tag
@@ -214,6 +225,16 @@ def load_and_preprocess_data(filename_train, filename_valid, filename_test, seq_
     valid_sentences, valid_labels = read_conll(filename_valid)
     test_sentences, test_labels = read_conll(filename_test)
 
+    # Merge B- and I- variants into a single entity tag (for example, B-PROC/I-PROC -> PROC).
+    def normalize_tag(tag):
+        if tag.startswith(('B-', 'I-')):
+            return tag[2:]
+        return tag
+
+    train_labels = [[normalize_tag(tag) for tag in tags] for tags in train_labels]
+    valid_labels = [[normalize_tag(tag) for tag in tags] for tags in valid_labels]
+    test_labels = [[normalize_tag(tag) for tag in tags] for tags in test_labels]
+
     print("Building vocabulary and tag dictionaries...")
     
     # 1. World vocabulary (based on all splits)
@@ -234,6 +255,12 @@ def load_and_preprocess_data(filename_train, filename_valid, filename_test, seq_
     # Index 0 is reserved for label padding (or -100 for CrossEntropyLoss)
     tag2int = {tag: i + 1 for i, tag in enumerate(sorted(all_tags))}
     tag2int['<PAD>'] = 0  # Padding for labels
+
+    print("Classes and indexes:")
+    for label, index in sorted(tag2int.items(), key=lambda item: item[1]):
+        if label == '<PAD>':
+            continue
+        print(f"{label}: {index}")
 
     print("Encoding sequences...")
     # Encodage des mots (Features)
@@ -494,7 +521,7 @@ with torch.no_grad():
 
     print(f'Accuracy: {test_acc/len(testloader):.4f}, Loss: {test_loss/len(testloader):.4f}')
 
-
+print()
 print(classification_report(all_target, all_predicted))
 
 # --- Display learning curve ---

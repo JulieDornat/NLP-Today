@@ -4,9 +4,9 @@ import pandas as pd
 import os
 import re
 
-TRAIN_DATA_PATH = "QUAERO_FrenchMed/EMEA/EMEAtrain_layer1_ID.conll"
-VALID_DATA_PATH = "QUAERO_FrenchMed/EMEA/EMEAdev_layer1_ID.conll"
-TEST_DATA_PATH = "QUAERO_FrenchMed/EMEA/EMEAtest_layer1_ID.conll"
+TRAIN_DATA_PATH = "QUAERO_FrenchMed/MEDLINE/MEDLINEtrain_layer1_ID.conll"
+VALID_DATA_PATH = "QUAERO_FrenchMed/MEDLINE/MEDLINEdev_layer1_ID.conll"
+TEST_DATA_PATH = "QUAERO_FrenchMed/MEDLINE/MEDLINEtest_layer1_ID.conll"
 
 DATA_DIR = "extracted_data"
 OUT_DIR = os.path.join(DATA_DIR, "word2vec_output")
@@ -59,10 +59,10 @@ for model, lr, (emb_path, idx) in grid:
         "--train", TRAIN_DATA_PATH,
         "--valid", VALID_DATA_PATH,
         "--test", TEST_DATA_PATH,
-        "--epochs", "20",
+        "--epochs", "50",
         "--lr", str(lr),
     ]
-    
+    print(cmd)
     # Script execution and retrieve output
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
