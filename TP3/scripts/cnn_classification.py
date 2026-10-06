@@ -32,6 +32,8 @@ parser.add_argument("--train",default='',type=str,help="Training data in cnll fo
 parser.add_argument("--valid",default='',type=str,help="Validation (valid or dev) data in cnll format",required=True)
 parser.add_argument("--test",default='',type=str,help="Evaluation data in cnll format",required=True)
 parser.add_argument("--epochs",default=1,type=int,help="Number of epoch")
+parser.add_argument("--lr",default=0.0001,type=float,help="Learning rate")
+
 args = parser.parse_args()
 
 train_file = args.train # train file in csv format
@@ -41,6 +43,7 @@ test_file = args.valid # test file in csv format
 mymodel = args.model # cnn or lstm
 emb_model = EmbModel(args.emb_model)
 emb_model_path = args.emb_model_path
+lr = args.lr
 
 epochs = args.epochs
 
@@ -279,7 +282,6 @@ n_layers = 1
 dropout=0.25
 
 
-lr = 1e-4
 #dropout_keep_prob = 0.5
 max_document_length = sequence_length  # each sentence has until 100 words
 #seed = 1
@@ -300,7 +302,6 @@ print(model)
 
 
 # training config
-#lr = 0.001
 #criterion = nn.BCELoss()  # we use BCELoss cz we have binary classification problem
 
 # IMPROVEMENT: Smooth weights to prevent majority class dominance.
@@ -506,7 +507,15 @@ plt.plot(epochs_range, history['val_loss'], label='Validation Loss', marker='o')
 
 plt.xlabel('Epochs')
 plt.ylabel('Loss')
-plt.title('Learning curve (Loss by Epoch)')
+embedding_model_names = {
+    EmbModel.FastText: 'FastText',
+    EmbModel.W2V_CBow: 'Word2Vec CBow',
+    EmbModel.W2V_Skipgram: 'Word2Vec Skipgram',
+}
+plt.title(
+    f"Learning curve (Loss by Epoch) — {embedding_model_names[emb_model]}, "
+    f"lr={lr:g}, model={mymodel.lower()}"
+)
 plt.legend()
 plt.grid(True)
 
