@@ -523,10 +523,10 @@ plt.grid(True)
 
 from pathlib import Path
 
-image_path = Path('learning_curve_loss.png')
+image_path = Path('results/learning_curve_loss.png')
 suffix = 1
 while image_path.exists():
-    image_path = Path(f'learning_curve_loss_{suffix}.png')
+    image_path = Path(f'results/learning_curve_loss_{suffix}.png')
     suffix += 1
 
 plt.savefig(image_path)

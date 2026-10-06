@@ -18,7 +18,7 @@ emb_model_path = [f"./output/fasttext_med.bin",
 
 
 models = ['cnn', 'lstm']
-learning_rates = [1e-3, 5e-4, 1e-4]
+learning_rates = [1e-5, 5e-5, 1e-4]
 index = [0, 1, 2]
 results = []
 

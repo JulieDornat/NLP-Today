@@ -1,0 +1,4 @@
+Best configuration for each embedding:
+./output/fasttext_med.bin: model=cnn, learning rate=1e-05, F1=0.71
+extracted_data/word2vec_output/embeddings/w2v_cbow_med.vec: model=cnn, learning rate=1e-05, F1=0.71
+extracted_data/word2vec_output/embeddings/w2v_skipgram_med.vec: model=cnn, learning rate=1e-05, F1=0.71
