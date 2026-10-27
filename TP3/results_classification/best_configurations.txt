@@ -1,0 +1,20 @@
+========================================
+Best configuration for each embedding (based on Seqeval Micro-F1):
+========================================
+Embedding: extracted_data/word2vec_output/embeddings/w2v_cbow_med.vec
+  -> Model: lstm
+  -> Learning Rate: 0.001
+  -> Seqeval Micro-F1: 0.1231
+
+Embedding: extracted_data/word2vec_output/embeddings/w2v_skipgram_med.vec
+  -> Model: cnn
+  -> Learning Rate: 0.001
+  -> Seqeval Micro-F1: 0.1493
+
+========================================
+🏆 ABSOLUTE BEST CONFIGURATION (Seqeval):
+   Model: cnn
+   Embedding: extracted_data/word2vec_output/embeddings/w2v_skipgram_med.vec
+   Learning Rate: 0.001
+   Seqeval Micro-F1: 0.1493
+========================================

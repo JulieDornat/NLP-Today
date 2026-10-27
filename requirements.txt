@@ -1,2 +1,7 @@
 spacy
 scispacy
+torch
+scipy
+scikit-learn
+fasttext-wheel
+fasttext
